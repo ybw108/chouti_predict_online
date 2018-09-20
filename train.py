@@ -1,3 +1,4 @@
+# coding: utf-8
 import pandas as pd
 import numpy as np
 import gc
@@ -14,6 +15,8 @@ import os
 from multiprocessing import Process
 import multiprocessing
 from sklearn.externals import joblib
+from functools import partial
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -144,25 +147,26 @@ def get_correlation(tdata):
 
 def get_click_features(row, history):
     history = history.loc[history.url == row.url]
-    history = history.loc[(history.refresh_timestamp < int(row['refresh_timestamp'])) & (history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*25)]
-    for i in [1, 3, 6, 12, 24]:
-        tdata = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*int(i)]
-        row['click_count_in_'+str(i)] = len(tdata)
-        row['click_ratio_in_'+str(i)] = len(tdata.loc[tdata.is_click == 1])/(len(tdata)+0.00001)
-        # rank
+    history = history.loc[history.refresh_timestamp < int(row['refresh_timestamp'])]
+
+    history = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*24]
+    row['click_ratio_in_24'] = len(history.loc[history.is_click == 1]) / (len(history) + 0.00001)
+
+    history = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000]
+    row['click_ratio_in_1'] = len(history.loc[history.is_click == 1]) / (len(history) + 0.00001)
+    # for i in [1, 24]: # [1, 3, 6, 12, 24]:
+    #     tdata = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*int(i)]
+    #     # row['click_count_in_'+str(i)] = len(tdata)
+    #     row['click_ratio_in_'+str(i)] = len(tdata.loc[tdata.is_click == 1])/(len(tdata)+0.00001)
+    #     # rank
     # print('click features done')
     return row
 
 
-def news_click_features(data, history, name):
-    data = data.apply(get_click_features, axis=1, history=history)
-    data = data[['url', 'refresh_day', 'refresh_hour', 'click_count_in_1', 'click_ratio_in_1',
-                 'click_count_in_3', 'click_ratio_in_3', 'click_count_in_6', 'click_ratio_in_6',
-                 'click_count_in_12', 'click_ratio_in_12', 'click_count_in_24', 'click_ratio_in_24',
-                 ]]
-    data.to_csv(dir+'/'+str(name)+'.csv', index=False)
-    print('%s done' % name)
-    gc.collect()
+def click_features_mp(df, history):
+    df = df.apply(get_click_features, axis=1, history=history)
+    df = df[['url', 'refresh_day', 'refresh_hour', 'click_ratio_in_1', 'click_ratio_in_24']]
+    return df
 
 
 def top_k_corr(row):
@@ -179,6 +183,13 @@ def top_k_corr(row):
     else:
         row['corr'] = -100
         return row
+
+
+def correlation_features_mp(df):
+    df['avg_cosine_center'] = df['corr'].apply(lambda x: sum(eval(x)) / len(eval(x)) if x != '[]' else -100)
+    df = df.apply(top_k_corr, axis=1)
+    del df['corr']
+    return df
 
 ###################################################
 
@@ -202,12 +213,19 @@ def top_k_corr(row):
 
 def get_w2v_category_correlation():
     # get w2v vector, category and correlation
+
     data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
+    print('number of instances: ' + str(len(data)))
+    user = data.drop_duplicates(['device_id'], keep='first')
+    print('number of users: ' + str(len(user)))
     data = data.drop_duplicates(['url'], keep='first')
     data = data[['url']]
+    print('number of news: ' + str(len(data)))
     data.to_csv(dir+'/news_list.csv', index=False)
+    user.to_csv(dir+'/user_list.csv', index=False)
 
     # vector & category
+    starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/news_vector.csv'):
         batch = 0
         wrong_batch_list = []
@@ -244,9 +262,11 @@ def get_w2v_category_correlation():
                     continue
             else:
                 batch += 1
-        print('w2v vector done')
+        endtime = datetime.datetime.now()
+        print('w2v vector get, time cost: ' + str((endtime - starttime).seconds / 60))
         print(wrong_batch_list)
 
+    starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/news_category.csv'):
         batch = 0
         wrong_batch_list = []
@@ -283,48 +303,52 @@ def get_w2v_category_correlation():
                     continue
             else:
                 batch += 1
-        print('category done')
+        endtime = datetime.datetime.now()
+        print('category vector get, time cost: ' + str((endtime - starttime).seconds / 60))
         print(wrong_batch_list)
 
-    if not os.path.exists(dir + '/news_corr.csv'):
-        batch = 0
-        wrong_batch_list = []
-        for df in pd.read_csv(dir + '/raw_data.csv', index_col=False, chunksize=300):
-            if batch >= 0:
-                try:
-                    batch += 1
-                    df = get_correlation(df)
-                    if batch == 1:
-                        df.to_csv(dir+'/news_corr.csv', index=False, encoding='utf-8')
-                    else:
-                        df.to_csv(dir+'/news_corr.csv', index=False, header=False, mode='a', encoding='utf-8')
-                    print('chunk %d done.' % batch)
-
-                except KeyError as reason:
-                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                    wrong_batch_list.append(batch)
-                    continue
-                except IndexError as reason:
-                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                    wrong_batch_list.append(batch)
-                    continue
-                except ValueError as reason:
-                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                    wrong_batch_list.append(batch)
-                    continue
-                except UnicodeDecodeError as reason:
-                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                    wrong_batch_list.append(batch)
-                    continue
-            else:
-                batch += 1
-        print('correlation done')
-        print(wrong_batch_list)
+    # starttime = datetime.datetime.now()
+    # if not os.path.exists(dir + '/news_corr.csv'):
+    #     batch = 0
+    #     wrong_batch_list = []
+    #     for df in pd.read_csv(dir + '/data_for_train.csv', index_col=False, chunksize=500):
+    #         if batch >= 0:
+    #             try:
+    #                 batch += 1
+    #                 df = get_correlation(df)
+    #                 if batch == 1:
+    #                     df.to_csv(dir+'/news_corr.csv', index=False, encoding='utf-8')
+    #                 else:
+    #                     df.to_csv(dir+'/news_corr.csv', index=False, header=False, mode='a', encoding='utf-8')
+    #                 print('chunk %d done.' % batch)
+    #
+    #             except KeyError as reason:
+    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
+    #                 wrong_batch_list.append(batch)
+    #                 continue
+    #             except IndexError as reason:
+    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
+    #                 wrong_batch_list.append(batch)
+    #                 continue
+    #             except ValueError as reason:
+    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
+    #                 wrong_batch_list.append(batch)
+    #                 continue
+    #             except UnicodeDecodeError as reason:
+    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
+    #                 wrong_batch_list.append(batch)
+    #                 continue
+    #         else:
+    #             batch += 1
+    #     endtime = datetime.datetime.now()
+    #     print('correlation get, time cost: ' + str((endtime - starttime).seconds / 60))
+    #     print(wrong_batch_list)
     os.remove(dir+'/news_list.csv')
     print('w2v,category,correlation done')
 
 
 def category_features():
+    starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/category_features.csv'):
         data = pd.read_csv(dir+'/data_for_train.csv', index_col=False)
         category = pd.read_csv(dir+'/news_category.csv', index_col=False)
@@ -363,48 +387,63 @@ def category_features():
              'cat_gj', 'cat_other', 'cat_party', 'cat_sh', 'cat_sport', 'cat_tech',
              'cat_war', 'cat_weather']]
         cat_data.to_csv(dir+'/category_features.csv', index=False)
-    print('category features done')
+    endtime = datetime.datetime.now()
+    print('category features done, time cost: ' + str((endtime - starttime).seconds / 60))
 
 
 def click_features():
+    starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/click_features.csv'):
-        history = pd.read_csv(dir + '/history.csv', index_col=False)
         data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
         data = data.drop_duplicates(['url', 'refresh_day', 'refresh_hour'], keep='first')  # 近似
-        #### 需要改动
+
+        # data = click_features_mp(data, history)
+        # data.to_csv(dir + '/click_features.csv', index=False)
+
+        split_dfs = np.array_split(data, 4)
+        del data
+        gc.collect()
+        history = pd.read_csv(dir + '/history.csv', index_col=False)
+        L = list(history['refresh_day'].unique())
+        L.sort()
+        history = history.loc[history.refresh_date.isin(L[-8:])]
+        history = history[['url', 'refresh_timestamp', 'is_click']]
         print('read done')
 
-        news_click_features(data, history, 'click_features')
-    # p1 = Process(target=news_click_features, args=(data1, history, 'click_features_1'))
-    # p2 = Process(target=news_click_features, args=(data2, history, 'click_features_2'))
-    # p3 = Process(target=news_click_features, args=(data3, history, 'click_features_3'))
-    # p4 = Process(target=news_click_features, args=(data4, history, 'click_features_4'))
-    #
-    # p1.start()
-    # p2.start()
-    # p3.start()
-    # p4.start()
-    #
-    # print("The number of CPU is:" + str(multiprocessing.cpu_count()))
-    # for p in multiprocessing.active_children():
-    #     print("child p.name: " + p.name + "\tp.id: " + str(p.pid))
-    # p1.join()
-    # p2.join()
-    # p3.join()
-    # p4.join()
-    print('click features done')
+        p = multiprocessing.Pool(processes=4)
+        pool_results = p.map(partial(click_features_mp, history=history), split_dfs)
+        p.close()
+        p.join()
+
+        # merging parts processed by different processes
+        parts = pd.concat(pool_results, axis=0)
+
+        # merging newly calculated parts to big_df
+        parts.to_csv(dir + '/click_features.csv', index=False)
+    endtime = datetime.datetime.now()
+    print('click features done, time cost: ' + str((endtime - starttime).seconds/60))
 
 
 def correlation_features():
+    starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/corr_features.csv'):
         news_corr = pd.read_csv(dir + '/news_corr.csv', index_col=False)
-        news_corr['avg_cosine_center'] = news_corr['corr'].apply(lambda x: sum(eval(x))/len(eval(x)) if x != '[]' else -100)
-        news_corr = news_corr.apply(top_k_corr, axis=1)
-        del news_corr['corr']
-        news_corr.to_csv(dir + '/corr_features.csv', index=False)
-        del news_corr
+
+        p = multiprocessing.Pool(processes=4)
+        split_dfs = np.array_split(news_corr, 4)
+        pool_results = p.map(correlation_features_mp, split_dfs)
+        p.close()
+        p.join()
+
+        # merging parts processed by different processes
+        parts = pd.concat(pool_results, axis=0)
+
+        # merging newly calculated parts to big_df
+        parts.to_csv(dir + '/corr_features.csv', index=False)
+
         gc.collect()
-    print('correlation features done')
+    endtime = datetime.datetime.now()
+    print('correlation features done, time cost: ' + str((endtime - starttime).seconds / 60))
 
 
 def merge_features():
@@ -415,15 +454,20 @@ def merge_features():
     # 先fill merge的时候还是会出现空值（没有历史的那部分用户）
     # category_features = category_features.fillna(1/14)
 
-    corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
-    corr_features = corr_features.fillna(-100)
+    # corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
+    # corr_features = corr_features.fillna(-100)
 
     news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
+    vector = news_vector.iloc[:, 1:].astype(np.float16)
+    news_vector = pd.concat([news_vector['url'], vector], axis=1)
+    del vector
+    gc.collect()
+
     print('read done')
     train = pd.merge(train, click_features, how='left', on=['url', 'refresh_day', 'refresh_hour'])
     train = pd.merge(train, category_features, how='left', on=['device_id', 'refresh_day'])
     train = train.fillna(1/14)
-    train = pd.merge(train, corr_features, how='left', on=['device_id', 'url'])
+    # train = pd.merge(train, corr_features, how='left', on=['device_id', 'url'])
     # label = train['is_click']
     # used_features = [c for c in train if c not in ignore]
     # train = train[used_features]
@@ -435,6 +479,7 @@ def merge_features():
 
 
 def best_cutoff_search(train, used_features):
+    starttime = datetime.datetime.now()
     date = train['refresh_date'].unique()
     date.sort()
     date = date[-1]
@@ -446,6 +491,7 @@ def best_cutoff_search(train, used_features):
                                   # colsample_bytree=0.7,
                                   # subsample=0.7,
                                   max_depth=-1,
+                                  two_round=True,
                                   # num_leaves=95,
                                   # reg_lambda=8,
                                   # max_bin=1000,
@@ -466,15 +512,19 @@ def best_cutoff_search(train, used_features):
     best_offline = max(zip(f1_dict.values(), f1_dict.keys()))
     print('best_f1: ', best_offline[0])
     print('best_f1_cutoff: ', best_offline[1])
+    endtime = datetime.datetime.now()
+    print('time cost: ' + str((endtime - starttime).seconds / 60))
     return model.best_iteration_
 
 
 def online_model(train, label, iterations):
+    starttime = datetime.datetime.now()
     gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=int(iterations), seed=2018,
                                   learning_rate=0.05,
                                   # colsample_bytree=0.7,
                                   # subsample=0.7,
                                   max_depth=-1,
+                                  two_round=True,
                                   # num_leaves=95,
                                   # reg_lambda=8,
                                   # max_bin=1000,
@@ -483,7 +533,8 @@ def online_model(train, label, iterations):
     print('begin training...')
     model = gbm.fit(train, label)
     joblib.dump(model, dir + '/lightgbm_model.m')
-    print('model get')
+    endtime = datetime.datetime.now()
+    print('model get, time cost: ' + str((endtime - starttime).seconds / 60))
     return
 
 
@@ -495,17 +546,19 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    get_w2v_category_correlation()
-    category_features()
-    click_features()
-    correlation_features()
+    # get_w2v_category_correlation()
+    # category_features()
+    # click_features()
+    # correlation_features()
 
     ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
                         'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
                         ]
     train = merge_features()
     used_features = [c for c in train if c not in ignored_features]
-
-    iterations = best_cutoff_search(train, used_features)
+    # iterations = best_cutoff_search(train, used_features)
+    iterations = 500
+    train = train.sample(frac=0.5)
+    print(train[used_features].info())
     online_model(train[used_features], train['is_click'], iterations)
 

@@ -15,6 +15,8 @@ from multiprocessing import Process
 import multiprocessing
 from sklearn.externals import joblib
 
+
+
 # 去除来源为weibo、抽屉的新闻
 def wash(tdata):
     for i in range(0, 4):
@@ -77,11 +79,20 @@ def subsample(data, fraction):
 
 
 def split(startdate, enddate):
-    data = pd.read_csv(dir + '/history.csv', index_col=False)
+    batch = 0
+    print('begin splitting train set...')
+    #data = pd.read_csv(dir + '/history.csv', index_col=False)
     if startdate < enddate:
-        data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)]
-        data.to_csv(dir + '/data_for_train.csv')
+        for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
+            batch += 1
+            data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)]
+            print('writing chunk %d...' % batch)
+            if batch == 1:
+                data.to_csv(dir + '/data_for_train.csv', index=False)
+            else:
+                data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
     else:
+        data = pd.read_csv(dir + '/history.csv', index_col=False)
         L = list(range(startdate, enddate+32))
         for i in range(len(L)):
             if L[i] > 31:
@@ -93,20 +104,34 @@ def split(startdate, enddate):
         tdata.to_csv(dir + '/data_for_train.csv', index=False)
 
 
+def preprocess_mp(df):
+    df = wash(df)
+    df = time_shift(df)
+    df['is_click'] = df['is_click'].apply(lambda x: 1 if x == 'Y' else 0)
+    return df
+
 def preprocess():
     batch = 0
     if not os.path.exists(dir + '/history.csv'):
-        for df in pd.read_csv('./data/raw/data.csv', index_col=False, chunksize=100000):
+        for df in pd.read_csv('./data/raw/export.csv', index_col=False, chunksize=2000000, error_bad_lines=False):
             batch += 1
-            df = wash(df)
-            df = time_shift(df)
-            df['is_click'] = df['is_click'].apply(lambda x: 1 if x == 'Y' else 0)
-            gc.collect()
+            # df = wash(df)
+            # df = time_shift(df)
+            # df['is_click'] = df['is_click'].apply(lambda x: 1 if x == 'Y' else 0)
+            # gc.collect()
+            p = multiprocessing.Pool(processes=4)
+            split_dfs = np.array_split(df, 4)
+            pool_results = p.map(preprocess_mp, split_dfs)
+            p.close()
+            p.join()
+            # merging parts processed by different processes
+            parts = pd.concat(pool_results, axis=0)
+
             print('writing chunk %d...' % batch)
             if batch == 1:
-                df.to_csv(dir + '/history.csv', index=False)
+                parts.to_csv(dir + '/history.csv', index=False)
             else:
-                df.to_csv(dir + '/history.csv', index=False, header=False, mode='a')
+                parts.to_csv(dir + '/history.csv', index=False, header=False, mode='a')
     print('preprocess done')
 
 
@@ -118,4 +143,4 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
     preprocess()
-    split(30, 3)
+    split(4, 10)
