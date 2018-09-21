@@ -7,8 +7,6 @@ import requests
 import time
 import datetime
 import heapq
-import math
-import sklearn
 import lightgbm
 from sklearn import metrics
 import os
@@ -16,8 +14,8 @@ from multiprocessing import Process
 import multiprocessing
 from sklearn.externals import joblib
 from functools import partial
-
 import warnings
+
 warnings.filterwarnings("ignore")
 
 
@@ -75,6 +73,8 @@ def time_shift(tdata):
 
 # 获取新闻w2v vector
 def get_w2v_vector(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
         url[i] = urllib.parse.quote(url[i])
@@ -102,6 +102,8 @@ def get_w2v_vector(tdata):
 
 # 获取新闻category
 def get_category(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
         url[i] = urllib.parse.quote(url[i])
@@ -109,7 +111,7 @@ def get_category(tdata):
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/category', data=para)
+        r = requests.post('http://ai.chouti.com/news/category', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
@@ -124,25 +126,28 @@ def get_category(tdata):
 
 
 # 获取新闻和用户兴趣点的相似度list
-def get_correlation(tdata):
-    tdata['post'] = tdata.apply(lambda row: str(row['device_id']) + ',' + str(urllib.parse.quote(row['url'])), axis=1)
-    url = '|'.join(list(tdata['post']))
-    para = {'str': url}
+def get_interest(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
+    device = list(tdata['device_id'])
+    para = {'deviceIds': device}
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/recommend/user_url_similar', data=para)
+        r = requests.post('http://ai.chouti.com/news/recommend/userFeature', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
             print('timeout retrying...')
-    corr = pd.Series(r.json()['data'])
-    print('correlation get')
-    # wv = list_to_frame(wv)
+    interest = pd.Series(r.json()['data'])
     tdata = tdata.reset_index(drop=True)
-    tdata = pd.concat([tdata, corr], axis=1)
-    tdata = tdata.rename(columns={0: 'corr'})
-    return tdata[['device_id', 'url', 'corr']]
+    tdata = pd.concat([tdata, interest], axis=1)
+    tdata.columns = ['device_id', 'interest']
+    tdata = tdata.fillna(-100)
+    print('interest get')
+    r.close()
+    time.sleep(1)
+    return tdata
 
 
 def get_click_features(row, history):
@@ -159,7 +164,7 @@ def get_click_features(row, history):
     #     # row['click_count_in_'+str(i)] = len(tdata)
     #     row['click_ratio_in_'+str(i)] = len(tdata.loc[tdata.is_click == 1])/(len(tdata)+0.00001)
     #     # rank
-    # print('click features done')
+    print('click features done')
     return row
 
 
@@ -193,23 +198,6 @@ def correlation_features_mp(df):
 
 ###################################################
 
-#
-# def preprocessing():
-#     batch = 0
-#     if not os.path.exists(dir + '/raw_data.csv'):
-#         for df in pd.read_csv('./data/data.csv', index_col=False, chunksize=100000):
-#             batch += 1
-#             df = wash(df)
-#             df = time_shift(df)
-#             df['is_click'] = df['is_click'].apply(lambda x: 1 if x == 'Y' else 0)
-#             gc.collect()
-#             print('writing chunk %d...' % batch)
-#             if batch == 1:
-#                 df.to_csv(dir+'/raw_data.csv', index=False)
-#             else:
-#                 df.to_csv(dir+'/raw_data.csv', index=False, header=False, mode='a')
-#     print('preprocess done')
-
 
 def get_w2v_category_correlation():
     # get w2v vector, category and correlation
@@ -217,6 +205,7 @@ def get_w2v_category_correlation():
     data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
     print('number of instances: ' + str(len(data)))
     user = data.drop_duplicates(['device_id'], keep='first')
+    user = user[['device_id']]
     print('number of users: ' + str(len(user)))
     data = data.drop_duplicates(['url'], keep='first')
     data = data[['url']]
@@ -307,42 +296,42 @@ def get_w2v_category_correlation():
         print('category vector get, time cost: ' + str((endtime - starttime).seconds / 60))
         print(wrong_batch_list)
 
-    # starttime = datetime.datetime.now()
-    # if not os.path.exists(dir + '/news_corr.csv'):
-    #     batch = 0
-    #     wrong_batch_list = []
-    #     for df in pd.read_csv(dir + '/data_for_train.csv', index_col=False, chunksize=500):
-    #         if batch >= 0:
-    #             try:
-    #                 batch += 1
-    #                 df = get_correlation(df)
-    #                 if batch == 1:
-    #                     df.to_csv(dir+'/news_corr.csv', index=False, encoding='utf-8')
-    #                 else:
-    #                     df.to_csv(dir+'/news_corr.csv', index=False, header=False, mode='a', encoding='utf-8')
-    #                 print('chunk %d done.' % batch)
-    #
-    #             except KeyError as reason:
-    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
-    #                 wrong_batch_list.append(batch)
-    #                 continue
-    #             except IndexError as reason:
-    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
-    #                 wrong_batch_list.append(batch)
-    #                 continue
-    #             except ValueError as reason:
-    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
-    #                 wrong_batch_list.append(batch)
-    #                 continue
-    #             except UnicodeDecodeError as reason:
-    #                 print("Error: " + str(reason) + " wrong batch is " + str(batch))
-    #                 wrong_batch_list.append(batch)
-    #                 continue
-    #         else:
-    #             batch += 1
-    #     endtime = datetime.datetime.now()
-    #     print('correlation get, time cost: ' + str((endtime - starttime).seconds / 60))
-    #     print(wrong_batch_list)
+    starttime = datetime.datetime.now()
+    #if not os.path.exists(dir + '/user_interest.csv'):
+    batch = 0
+    wrong_batch_list = []
+    for df in pd.read_csv(dir + '/user_list.csv', index_col=False, chunksize=500):
+        if batch >= 0:
+            try:
+                batch += 1
+                df = get_interest(df)
+                if batch == 1:
+                    df.to_csv(dir+'/user_interest2.csv', index=False, encoding='utf-8')
+                else:
+                    df.to_csv(dir+'/user_interest2.csv', index=False, header=False, mode='a', encoding='utf-8')
+                print('chunk %d done.' % batch)
+
+            except KeyError as reason:
+                print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                wrong_batch_list.append(batch)
+                continue
+            except IndexError as reason:
+                print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                wrong_batch_list.append(batch)
+                continue
+            except ValueError as reason:
+                print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                wrong_batch_list.append(batch)
+                continue
+            except UnicodeDecodeError as reason:
+                print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                wrong_batch_list.append(batch)
+                continue
+        else:
+            batch += 1
+    endtime = datetime.datetime.now()
+    print('correlation get, time cost: ' + str((endtime - starttime).seconds / 60))
+    print(wrong_batch_list)
     os.remove(dir+'/news_list.csv')
     print('w2v,category,correlation done')
 
@@ -404,7 +393,7 @@ def click_features():
         del data
         gc.collect()
         history = pd.read_csv(dir + '/history.csv', index_col=False)
-        L = list(history['refresh_day'].unique())
+        L = list(history['refresh_date'].unique())
         L.sort()
         history = history.loc[history.refresh_date.isin(L[-8:])]
         history = history[['url', 'refresh_timestamp', 'is_click']]
@@ -467,10 +456,6 @@ def merge_features():
     train = pd.merge(train, click_features, how='left', on=['url', 'refresh_day', 'refresh_hour'])
     train = pd.merge(train, category_features, how='left', on=['device_id', 'refresh_day'])
     train = train.fillna(1/14)
-    # train = pd.merge(train, corr_features, how='left', on=['device_id', 'url'])
-    # label = train['is_click']
-    # used_features = [c for c in train if c not in ignore]
-    # train = train[used_features]
     train = pd.merge(train, news_vector, how='left', on=['url'])
     del train['url']
     # train.to_csv(dir+'/train_set.csv', index=False)
@@ -485,22 +470,40 @@ def best_cutoff_search(train, used_features):
     date = date[-1]
     valid = train.loc[train.refresh_date == date]
     train = train.loc[train.refresh_date != date]
-
-    gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=2000, seed=2018,
-                                  learning_rate=0.05,
-                                  # colsample_bytree=0.7,
-                                  # subsample=0.7,
-                                  max_depth=-1,
-                                  two_round=True,
-                                  # num_leaves=95,
-                                  # reg_lambda=8,
-                                  # max_bin=1000,
-                                  # min_child_samples=12,
-                                  )
+    train = np.array_split(train, 4)
+    gbm = None
+    params = {
+        'objective': 'binary',
+        'learning_rate': 0.05,
+        'max_depth': -1,
+        'seed': 2018,
+        'metric': 'auc',
+    }
+    batch = 0
     print('begin searching best cutoff...')
-    model = gbm.fit(train[used_features], train['is_click'], eval_set=[(valid[used_features], valid['is_click'])],
-                    eval_metric='auc', early_stopping_rounds=100, verbose=False)
-    valid['predict'] = gbm.predict_proba(valid[used_features], num_iteration=model.best_iteration_)[:, 1]
+
+    for df in train:
+        # 区分特征x和结果Y
+
+        # 创建lgb的数据集
+        lgb_train = lightgbm.Dataset(df[used_features], df['is_click'].values)
+        lgb_eval = lightgbm.Dataset(valid[used_features], valid['is_click'].values, reference=lgb_train)
+
+        # 增量训练模型
+        # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
+        gbm = lightgbm.train(params,
+                             lgb_train,
+                             num_boost_round=2000,
+                             valid_sets=lgb_eval,
+                             early_stopping_rounds=100,
+                             init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
+                             verbose_eval=True,
+                             keep_training_booster=True)  # 增量训练
+
+        batch += 1
+        print('batch %d done' % batch)
+
+    valid['predict'] = gbm.predict(valid[used_features], num_iteration=gbm.best_iteration)
     L = [i/100.0 for i in range(30, 75, 5)]
     f1_dict = {}
     for i in L:
@@ -512,27 +515,48 @@ def best_cutoff_search(train, used_features):
     best_offline = max(zip(f1_dict.values(), f1_dict.keys()))
     print('best_f1: ', best_offline[0])
     print('best_f1_cutoff: ', best_offline[1])
+    print('best_iterations: ' + str(gbm.best_iteration))
     endtime = datetime.datetime.now()
     print('time cost: ' + str((endtime - starttime).seconds / 60))
-    return model.best_iteration_
+    return gbm.best_iteration
 
 
-def online_model(train, label, iterations):
+def online_model(train, used_features, iterations):
     starttime = datetime.datetime.now()
-    gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=int(iterations), seed=2018,
-                                  learning_rate=0.05,
-                                  # colsample_bytree=0.7,
-                                  # subsample=0.7,
-                                  max_depth=-1,
-                                  two_round=True,
-                                  # num_leaves=95,
-                                  # reg_lambda=8,
-                                  # max_bin=1000,
-                                  # min_child_samples=12,
-                                  )
+    train = np.array_split(train, 4)
+    gbm = None
+    params = {
+                'objective': 'binary',
+                'learning_rate': 0.05,
+                'max_depth': -1,
+                'seed': 2018,
+                'metric': 'auc',
+             }
+    batch = 0
     print('begin training...')
-    model = gbm.fit(train, label)
-    joblib.dump(model, dir + '/lightgbm_model.m')
+    for df in train:
+        # 区分特征x和结果Y
+        train_X = df[used_features]
+        train_Y = df['is_click']
+
+        # 创建lgb的数据集
+        lgb_train = lightgbm.Dataset(train_X, train_Y.values)
+        del train_X, train_Y
+        gc.collect()
+
+        # 增量训练模型
+        # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
+        gbm = lightgbm.train(params,
+                             lgb_train,
+                             num_boost_round=int(iterations),
+                             init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
+                             verbose_eval=False,
+                             keep_training_booster=True)  # 增量训练
+
+
+        batch += 1
+        print('batch %d done' %batch)
+    joblib.dump(gbm, dir + '/lightgbm_model.m')
     endtime = datetime.datetime.now()
     print('model get, time cost: ' + str((endtime - starttime).seconds / 60))
     return
@@ -546,19 +570,22 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    # get_w2v_category_correlation()
-    # category_features()
-    # click_features()
+    get_w2v_category_correlation()
+    #category_features()
+    #click_features()
     # correlation_features()
 
-    ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
-                        'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
-                        ]
-    train = merge_features()
-    used_features = [c for c in train if c not in ignored_features]
+    # ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
+    #                     'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
+    #                     ]
+    # train = merge_features()
+    #
+    # train.head(1000).to_csv('./look.csv', index=False)
+    #
+    # used_features = [c for c in train if c not in ignored_features]
     # iterations = best_cutoff_search(train, used_features)
-    iterations = 500
-    train = train.sample(frac=0.5)
-    print(train[used_features].info())
-    online_model(train[used_features], train['is_click'], iterations)
+    # # iterations = 500
+    # # train = train.sample(frac=0.5)
+    # # print(train[used_features].info())
+    # # online_model(train, used_features, iterations)
 
