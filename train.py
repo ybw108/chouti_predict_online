@@ -9,6 +9,7 @@ import datetime
 import heapq
 import lightgbm
 from sklearn import metrics
+from sklearn.decomposition import PCA
 import os
 from multiprocessing import Process
 import multiprocessing
@@ -297,41 +298,41 @@ def get_w2v_category_correlation():
         print(wrong_batch_list)
 
     starttime = datetime.datetime.now()
-    #if not os.path.exists(dir + '/user_interest.csv'):
-    batch = 0
-    wrong_batch_list = []
-    for df in pd.read_csv(dir + '/user_list.csv', index_col=False, chunksize=500):
-        if batch >= 0:
-            try:
-                batch += 1
-                df = get_interest(df)
-                if batch == 1:
-                    df.to_csv(dir+'/user_interest2.csv', index=False, encoding='utf-8')
-                else:
-                    df.to_csv(dir+'/user_interest2.csv', index=False, header=False, mode='a', encoding='utf-8')
-                print('chunk %d done.' % batch)
+    if not os.path.exists(dir + '/user_interest.csv'):
+        batch = 0
+        wrong_batch_list = []
+        for df in pd.read_csv(dir + '/user_list.csv', index_col=False, chunksize=500):
+            if batch >= 0:
+                try:
+                    batch += 1
+                    df = get_interest(df)
+                    if batch == 1:
+                        df.to_csv(dir+'/user_interest2.csv', index=False, encoding='utf-8')
+                    else:
+                        df.to_csv(dir+'/user_interest2.csv', index=False, header=False, mode='a', encoding='utf-8')
+                    print('chunk %d done.' % batch)
 
-            except KeyError as reason:
-                print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                wrong_batch_list.append(batch)
-                continue
-            except IndexError as reason:
-                print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                wrong_batch_list.append(batch)
-                continue
-            except ValueError as reason:
-                print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                wrong_batch_list.append(batch)
-                continue
-            except UnicodeDecodeError as reason:
-                print("Error: " + str(reason) + " wrong batch is " + str(batch))
-                wrong_batch_list.append(batch)
-                continue
-        else:
-            batch += 1
-    endtime = datetime.datetime.now()
-    print('correlation get, time cost: ' + str((endtime - starttime).seconds / 60))
-    print(wrong_batch_list)
+                except KeyError as reason:
+                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                    wrong_batch_list.append(batch)
+                    continue
+                except IndexError as reason:
+                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                    wrong_batch_list.append(batch)
+                    continue
+                except ValueError as reason:
+                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                    wrong_batch_list.append(batch)
+                    continue
+                except UnicodeDecodeError as reason:
+                    print("Error: " + str(reason) + " wrong batch is " + str(batch))
+                    wrong_batch_list.append(batch)
+                    continue
+            else:
+                batch += 1
+        endtime = datetime.datetime.now()
+        print('correlation get, time cost: ' + str((endtime - starttime).seconds / 60))
+        print(wrong_batch_list)
     os.remove(dir+'/news_list.csv')
     print('w2v,category,correlation done')
 
@@ -447,119 +448,186 @@ def merge_features():
     # corr_features = corr_features.fillna(-100)
 
     news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
-    vector = news_vector.iloc[:, 1:].astype(np.float16)
-    news_vector = pd.concat([news_vector['url'], vector], axis=1)
-    del vector
+    x = news_vector.iloc[:, 1:]
+    pca = PCA(n_components=100)
+    x_pca = pca.fit_transform(x)
+    joblib.dump(pca, './pca_model.m')
+    x_pca = x_pca.astype(np.float16)
+    vector = pd.concat([news_vector['url'], pd.DataFrame(x_pca)], axis=1)
+
+    del news_vector
     gc.collect()
 
     print('read done')
     train = pd.merge(train, click_features, how='left', on=['url', 'refresh_day', 'refresh_hour'])
     train = pd.merge(train, category_features, how='left', on=['device_id', 'refresh_day'])
     train = train.fillna(1/14)
-    train = pd.merge(train, news_vector, how='left', on=['url'])
+    train = pd.merge(train, vector, how='left', on=['url'])
     del train['url']
     # train.to_csv(dir+'/train_set.csv', index=False)
     print('merge done')
     return train
 
 
+# 抽样训练
 def best_cutoff_search(train, used_features):
-    starttime = datetime.datetime.now()
     date = train['refresh_date'].unique()
     date.sort()
     date = date[-1]
     valid = train.loc[train.refresh_date == date]
     train = train.loc[train.refresh_date != date]
-    train = np.array_split(train, 4)
-    gbm = None
-    params = {
-        'objective': 'binary',
-        'learning_rate': 0.05,
-        'max_depth': -1,
-        'seed': 2018,
-        'metric': 'auc',
-    }
-    batch = 0
+
+    gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=2000, seed=2018,
+                                  learning_rate=0.05,
+                                  # colsample_bytree=0.7,
+                                  # subsample=0.7,
+                                  max_depth=-1,
+                                  # num_leaves=95,
+                                  # reg_lambda=8,
+                                  # max_bin=1000,
+                                  # min_child_samples=12,
+                                  )
     print('begin searching best cutoff...')
-
-    for df in train:
-        # 区分特征x和结果Y
-
-        # 创建lgb的数据集
-        lgb_train = lightgbm.Dataset(df[used_features], df['is_click'].values)
-        lgb_eval = lightgbm.Dataset(valid[used_features], valid['is_click'].values, reference=lgb_train)
-
-        # 增量训练模型
-        # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
-        gbm = lightgbm.train(params,
-                             lgb_train,
-                             num_boost_round=2000,
-                             valid_sets=lgb_eval,
-                             early_stopping_rounds=100,
-                             init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
-                             verbose_eval=True,
-                             keep_training_booster=True)  # 增量训练
-
-        batch += 1
-        print('batch %d done' % batch)
-
-    valid['predict'] = gbm.predict(valid[used_features], num_iteration=gbm.best_iteration)
-    L = [i/100.0 for i in range(30, 75, 5)]
-    f1_dict = {}
+    model = gbm.fit(train[used_features], train['is_click'], eval_set=[(valid[used_features], valid['is_click'])],
+                    eval_metric='auc', early_stopping_rounds=50, verbose=True)
+    valid['predict'] = gbm.predict_proba(valid[used_features], num_iteration=model.best_iteration_)[:, 1]
+    L = [i/100.0 for i in range(0, 75, 5)]
+    accuracy_dict = {}
     for i in L:
-        valid['predict_label'] = valid['predict'].apply(lambda x: 1 if x >= i else 0)
-        f1_score = metrics.f1_score(valid['is_click'], valid['predict_label'])
-        print('cutoff: ' + str(i) + ', f1_score: ' + str(f1_score))
-        f1_dict[i] = f1_score
+        pred = valid['predict'].apply(lambda x: 1 if x >= i else 0)
+        acc_score = metrics.accuracy_score(valid['is_click'], pred)
+        print('cutoff: ' + str(i) + ', accuracy: ' + str(acc_score))
+        accuracy_dict[i] = acc_score
 
-    best_offline = max(zip(f1_dict.values(), f1_dict.keys()))
-    print('best_f1: ', best_offline[0])
-    print('best_f1_cutoff: ', best_offline[1])
-    print('best_iterations: ' + str(gbm.best_iteration))
-    endtime = datetime.datetime.now()
-    print('time cost: ' + str((endtime - starttime).seconds / 60))
-    return gbm.best_iteration
+    best_offline = max(zip(accuracy_dict.values(), accuracy_dict.keys()))
+    print('best_accuracy: ', best_offline[0])
+    print('best_accuracy_cutoff: ', best_offline[1])
+    return model.best_iteration_
 
 
 def online_model(train, used_features, iterations):
     starttime = datetime.datetime.now()
-    train = np.array_split(train, 4)
-    gbm = None
-    params = {
-                'objective': 'binary',
-                'learning_rate': 0.05,
-                'max_depth': -1,
-                'seed': 2018,
-                'metric': 'auc',
-             }
-    batch = 0
+    gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=int(iterations), seed=2018,
+                                  learning_rate=0.05,
+                                  # colsample_bytree=0.7,
+                                  # subsample=0.7,
+                                  max_depth=-1,
+                                  # num_leaves=95,
+                                  # reg_lambda=8,
+                                  # max_bin=1000,
+                                  # min_child_samples=12,
+                                  )
     print('begin training...')
-    for df in train:
-        # 区分特征x和结果Y
-        train_X = df[used_features]
-        train_Y = df['is_click']
-
-        # 创建lgb的数据集
-        lgb_train = lightgbm.Dataset(train_X, train_Y.values)
-        del train_X, train_Y
-        gc.collect()
-
-        # 增量训练模型
-        # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
-        gbm = lightgbm.train(params,
-                             lgb_train,
-                             num_boost_round=int(iterations),
-                             init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
-                             verbose_eval=False,
-                             keep_training_booster=True)  # 增量训练
-
-
-        batch += 1
-        print('batch %d done' %batch)
-    joblib.dump(gbm, dir + '/lightgbm_model.m')
+    model = gbm.fit(train[used_features], train['is_click'])
+    joblib.dump(model, './lightgbm_model.m')
     endtime = datetime.datetime.now()
     print('model get, time cost: ' + str((endtime - starttime).seconds / 60))
     return
+
+# 增量训练
+# def best_cutoff_search(train, used_features):
+#     starttime = datetime.datetime.now()
+#     date = train['refresh_date'].unique()
+#     date.sort()
+#     date = date[-1]
+#     valid = train.loc[train.refresh_date == date]
+#     train = train.loc[train.refresh_date != date]
+#     train = np.array_split(train, 4)
+#     gbm = None
+#     iterations = []
+#     params = {
+#         'objective': 'binary',
+#         'learning_rate': 0.05,
+#         'max_depth': -1,
+#         'seed': 2018,
+#         'metric': 'auc',
+#     }
+#     batch = 0
+#     print('begin searching best cutoff...')
+#
+#     for df in train:
+#         # 区分特征x和结果Y
+#
+#         # 创建lgb的数据集
+#         lgb_train = lightgbm.Dataset(df[used_features], df['is_click'].values)
+#         lgb_eval = lightgbm.Dataset(valid[used_features], valid['is_click'].values, reference=lgb_train)
+#
+#         # 增量训练模型
+#         # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
+#         gbm = lightgbm.train(params,
+#                              lgb_train,
+#                              num_boost_round=2000,
+#                              valid_sets=lgb_eval,
+#                              early_stopping_rounds=100,
+#                              init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
+#                              verbose_eval=True,
+#                              keep_training_booster=True)  # 增量训练
+#
+#         batch += 1
+#         print('batch %d done' % batch)
+#         iterations.append(gbm.best_iteration)
+#     valid['predict'] = gbm.predict(valid[used_features], num_iteration=gbm.best_iteration)
+#     L = [i/100.0 for i in range(0, 75, 5)]
+#     f1_dict = {}
+#     for i in L:
+#         pred = valid['predict'].apply(lambda x: 1 if x >= i else 0)
+#         f1_score = metrics.f1_score(valid['is_click'], pred)
+#         print('cutoff: ' + str(i) + ', f1_score: ' + str(f1_score))
+#
+#         f1_dict[i] = f1_score
+#
+#     best_offline = max(zip(f1_dict.values(), f1_dict.keys()))
+#     print('best_f1: ', best_offline[0])
+#     print('best_f1_cutoff: ', best_offline[1])
+#     print('best_iterations: ' + str(gbm.best_iteration))
+#     endtime = datetime.datetime.now()
+#     print('time cost: ' + str((endtime - starttime).seconds / 60))
+#     return iterations
+
+
+# def online_model(train, used_features, iterations):
+#     starttime = datetime.datetime.now()
+#     train = np.array_split(train, 4)
+#     gbm = None
+#     params = {
+#                 'objective': 'binary',
+#                 'learning_rate': 0.05,
+#                 'max_depth': -1,
+#                 'seed': 2018,
+#                 'metric': 'auc',
+#              }
+#     batch = 0
+#     print('begin training...')
+#     for df in train:
+#         # 区分特征x和结果Y
+#         train_X = df[used_features]
+#         train_Y = df['is_click']
+#
+#         # 创建lgb的数据集
+#         lgb_train = lightgbm.Dataset(train_X, train_Y.values)
+#         del train_X, train_Y
+#         gc.collect()
+#
+#         if batch == 0:
+#             boost_round = iterations[0]
+#         else:
+#             boost_round = iterations[batch] - iterations[batch-1]
+#         # 增量训练模型
+#         # 通过 init_model 和 keep_training_booster 两个参数实现增量训练
+#         gbm = lightgbm.train(params,
+#                              lgb_train,
+#                              num_boost_round=boost_round,
+#                              init_model=gbm,  # 如果gbm不为None，那么就是在上次的基础上接着训练
+#                              verbose_eval=False,
+#                              keep_training_booster=True)  # 增量训练
+#
+#
+#         batch += 1
+#         print('batch %d done' %batch)
+#     joblib.dump(gbm, dir + '/lightgbm_model.m')
+#     endtime = datetime.datetime.now()
+#     print('model get, time cost: ' + str((endtime - starttime).seconds / 60))
+#     return
 
 
 if __name__ == '__main__':
@@ -570,22 +638,19 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    get_w2v_category_correlation()
-    #category_features()
-    #click_features()
+    # get_w2v_category_correlation()
+    # category_features()
+    # click_features()
     # correlation_features()
 
-    # ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
-    #                     'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
-    #                     ]
-    # train = merge_features()
-    #
-    # train.head(1000).to_csv('./look.csv', index=False)
-    #
-    # used_features = [c for c in train if c not in ignored_features]
-    # iterations = best_cutoff_search(train, used_features)
-    # # iterations = 500
-    # # train = train.sample(frac=0.5)
-    # # print(train[used_features].info())
-    # # online_model(train, used_features, iterations)
+    ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
+                        'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
+                        ]
+    train = merge_features()
+    # train = train.sample(frac=0.6)
+
+    used_features = [c for c in train if c not in ignored_features]
+    iterations = best_cutoff_search(train, used_features)
+    print(train[used_features].info())
+    online_model(train, used_features, iterations)
 

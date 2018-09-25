@@ -67,14 +67,14 @@ def subsample(data, fraction):
     data = data.sample(frac=1)
     return data
 
-
+# 抽样0.6
 def split(startdate, enddate):
     batch = 0
     print('begin splitting train set...')
     if startdate < enddate:
         for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
             batch += 1
-            data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)]
+            data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)].sample(frac=0.6)
             print('writing chunk %d...' % batch)
             if batch == 1:
                 data.to_csv(dir + '/data_for_train.csv', index=False)
@@ -87,7 +87,7 @@ def split(startdate, enddate):
                 L[i] -= 31
         for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
             batch += 1
-            data = data.loc[data.refresh_day.isin(L)]
+            data = data.loc[data.refresh_day.isin(L)].sample(frac=0.6)
             print('writing chunk %d...' % batch)
             if batch == 1:
                 data.to_csv(dir + '/data_for_train.csv', index=False)
@@ -136,4 +136,4 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
     preprocess()
-    split(4,10)  # (4,10)
+    split(4, 10)  # (4,10)

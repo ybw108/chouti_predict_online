@@ -4,10 +4,6 @@ import gc
 import time
 import datetime
 import heapq
-import math
-import sklearn
-import lightgbm
-import os
 from sklearn.externals import joblib
 from flask import request
 import flask
@@ -90,6 +86,8 @@ def request_w2v_vector(tdata):
         if wv[i] is None:
             wv[i] = filling_vector
     wv = pd.DataFrame(wv)
+    pca = joblib.load('./pca_model.m')
+    wv = pca.transform(wv)
     print('vector get')
     # wv = list_to_frame(wv)
     tdata = tdata.reset_index(drop=True)
@@ -228,6 +226,7 @@ def make_features(df, history):
 
     df = get_category_features(df)
     df = request_w2v_vector(df)
+
     return df
 
 
