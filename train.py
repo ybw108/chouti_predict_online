@@ -5,6 +5,7 @@ import gc
 import urllib
 import requests
 import time
+import math
 import datetime
 import heapq
 import lightgbm
@@ -83,7 +84,7 @@ def get_w2v_vector(tdata):
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/feature', data=para)
+        r = requests.post('http://ai.chouti.com/news/feature', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
@@ -175,26 +176,38 @@ def click_features_mp(df, history):
     return df
 
 
-def top_k_corr(row):
-    if row['corr'] != '[]':
-        temp = heapq.nlargest(5, eval(row['corr']))
+def top_k_corr(row, user, news):
+    news_vector = news.loc[news.url == row['url']].iloc[0, 1:]
+    # news_vector = np.array(news_vector)
+    center_list = user.loc[user.device_id == row['device_id'], ['interest']].iloc[0, 0]
+    if center_list != -100:
+        center_list = eval(center_list)
+    else:
+        center_list = -100
+    cosine_list = []
+    if (news_vector['0'] != -100) & (center_list != -100):
+        news_vector = np.array(news_vector)
+        for i in center_list:
+            i = np.array(i)
+            cosine_list.append(i.dot(news_vector)/(math.sqrt((i**2).sum()) * math.sqrt((news_vector**2).sum())))
+        temp = heapq.nlargest(5, cosine_list)
         temp = pd.Series(temp)
         temp_index = []
         for j in range(len(temp)):
-            temp_index.append('cosine_with_top'+str(j+1))
+            temp_index.append('cosine_with_top' + str(j + 1))
         temp.index = temp_index
         row = pd.concat([row, temp])
-        # print('corr get')
-        return row
-    else:
-        row['corr'] = -100
-        return row
+        row['cosine_top_5_avg'] = sum(temp)/len(temp)
+        row['cosine_all_avg'] = sum(cosine_list)/len(cosine_list)
+    print('correlation get')
+    row = row.fillna(-100)
+    return row
 
 
-def correlation_features_mp(df):
-    df['avg_cosine_center'] = df['corr'].apply(lambda x: sum(eval(x)) / len(eval(x)) if x != '[]' else -100)
-    df = df.apply(top_k_corr, axis=1)
-    del df['corr']
+def correlation_features_mp(df, user, news):
+    df = df.apply(top_k_corr, user=user, news=news, axis=1)
+    df = df[['device_id', 'url', 'refresh_timestamp',  'cosine_with_top1', 'cosine_with_top2', 'cosine_with_top3', 'cosine_with_top4',
+             'cosine_with_top5', 'cosine_top_5_avg', 'cosine_all_avg']]
     return df
 
 ###################################################
@@ -417,11 +430,15 @@ def click_features():
 def correlation_features():
     starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/corr_features.csv'):
-        news_corr = pd.read_csv(dir + '/news_corr.csv', index_col=False)
+        data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
+        data = data[['device_id', 'url', 'refresh_timestamp']]
+        user_interest = pd.read_csv(dir + '/user_interest.csv', index_col=False)
+        news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
 
+        # pool_results = correlation_features_mp(data, user_interest, news_vector)
         p = multiprocessing.Pool(processes=4)
-        split_dfs = np.array_split(news_corr, 4)
-        pool_results = p.map(correlation_features_mp, split_dfs)
+        split_dfs = np.array_split(data, 4)
+        pool_results = p.map(partial(correlation_features_mp, user=user_interest, news=news_vector), split_dfs)
         p.close()
         p.join()
 
@@ -429,6 +446,7 @@ def correlation_features():
         parts = pd.concat(pool_results, axis=0)
 
         # merging newly calculated parts to big_df
+        parts = parts.fillna(-100)
         parts.to_csv(dir + '/corr_features.csv', index=False)
 
         gc.collect()
@@ -439,19 +457,17 @@ def correlation_features():
 def merge_features():
     train = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
     click_features = pd.read_csv(dir + '/click_features.csv', index_col=False)
-
     category_features = pd.read_csv(dir + '/category_features.csv', index_col=False)
-    # 先fill merge的时候还是会出现空值（没有历史的那部分用户）
-    # category_features = category_features.fillna(1/14)
 
     # corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
     # corr_features = corr_features.fillna(-100)
 
+    # 对 news_vector PCA降维
     news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
     x = news_vector.iloc[:, 1:]
     pca = PCA(n_components=100)
     x_pca = pca.fit_transform(x)
-    joblib.dump(pca, './pca_model.m')
+    joblib.dump(pca, dir + '/pca_model.m')
     x_pca = x_pca.astype(np.float16)
     vector = pd.concat([news_vector['url'], pd.DataFrame(x_pca)], axis=1)
 
@@ -489,7 +505,7 @@ def best_cutoff_search(train, used_features):
                                   )
     print('begin searching best cutoff...')
     model = gbm.fit(train[used_features], train['is_click'], eval_set=[(valid[used_features], valid['is_click'])],
-                    eval_metric='auc', early_stopping_rounds=50, verbose=True)
+                    eval_metric='auc', early_stopping_rounds=50, verbose=False)
     valid['predict'] = gbm.predict_proba(valid[used_features], num_iteration=model.best_iteration_)[:, 1]
     L = [i/100.0 for i in range(0, 75, 5)]
     accuracy_dict = {}
@@ -519,7 +535,7 @@ def online_model(train, used_features, iterations):
                                   )
     print('begin training...')
     model = gbm.fit(train[used_features], train['is_click'])
-    joblib.dump(model, './lightgbm_model.m')
+    joblib.dump(model, dir + '/lightgbm_model.m')
     endtime = datetime.datetime.now()
     print('model get, time cost: ' + str((endtime - starttime).seconds / 60))
     return
@@ -638,10 +654,10 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    # get_w2v_category_correlation()
-    # category_features()
-    # click_features()
-    # correlation_features()
+    get_w2v_category_correlation()
+    category_features()
+    click_features()
+    correlation_features()
 
     ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
                         'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',

@@ -160,7 +160,7 @@ def top_k_corr(row):
         for j in range(len(temp)):
             temp_index.append('cosine_with_top'+str(j+1))
         temp.index = temp_index
-        temp['top_5_avg_cosine'] = temp.mean()
+        temp['cosine_top_5_avg'] = temp.mean()
         row = pd.concat([row, temp])
         # print('corr get')
         return row
@@ -220,7 +220,7 @@ def make_features(df, history):
     ############################################
     # df = df.apply(get_click_features, axis=1, history=history)
     df = request_correlation(df)
-    df['avg_cosine_center'] = df['corr'].apply(lambda x: sum(x) / len(x) if x != [] else -100)
+    df['cosine_all_avg'] = df['corr'].apply(lambda x: sum(x) / len(x) if x != [] else -100)
     df = df.apply(top_k_corr, axis=1)
     del df['corr']
 
