@@ -99,6 +99,8 @@ def get_w2v_vector(tdata):
     # wv = list_to_frame(wv)
     tdata = tdata.reset_index(drop=True)
     tdata = pd.concat([tdata, wv], axis=1)
+    r.close()
+    time.sleep(1)
     return tdata
 
 
@@ -124,6 +126,7 @@ def get_category(tdata):
     tdata = pd.merge(tdata, category, how='left', on=['url'])
     print('category get')
     r.close()
+    time.sleep(1)
     return tdata
 
 
@@ -159,8 +162,9 @@ def get_click_features(row, history):
     history = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*24]
     row['click_ratio_in_24'] = len(history.loc[history.is_click == 1]) / (len(history) + 0.00001)
 
-    history = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000]
-    row['click_ratio_in_1'] = len(history.loc[history.is_click == 1]) / (len(history) + 0.00001)
+    # history = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000]
+    # row['click_ratio_in_1'] = len(history.loc[history.is_click == 1]) / (len(history) + 0.00001)
+
     # for i in [1, 24]: # [1, 3, 6, 12, 24]:
     #     tdata = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*int(i)]
     #     # row['click_count_in_'+str(i)] = len(tdata)
@@ -199,7 +203,7 @@ def top_k_corr(row, user, news):
         row = pd.concat([row, temp])
         row['cosine_top_5_avg'] = sum(temp)/len(temp)
         row['cosine_all_avg'] = sum(cosine_list)/len(cosine_list)
-    print('correlation get')
+    # print('correlation get')
     row = row.fillna(-100)
     return row
 
@@ -367,7 +371,7 @@ def category_features():
         # print('read done')
 
         cat_data = data.drop_duplicates(['device_id', 'refresh_date'])  # 取用户-日期
-        # 7月10日之前在训练集里出现的的点击历史
+
         t_history = history.loc[history.device_id.isin(cat_data['device_id'])]
         result = pd.DataFrame()
         L = list(cat_data['refresh_date'].unique())
@@ -429,26 +433,31 @@ def click_features():
 
 def correlation_features():
     starttime = datetime.datetime.now()
+    print('begin generating corr features...')
     if not os.path.exists(dir + '/corr_features.csv'):
-        data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
-        data = data[['device_id', 'url', 'refresh_timestamp']]
         user_interest = pd.read_csv(dir + '/user_interest.csv', index_col=False)
         news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
 
-        # pool_results = correlation_features_mp(data, user_interest, news_vector)
-        p = multiprocessing.Pool(processes=4)
-        split_dfs = np.array_split(data, 4)
-        pool_results = p.map(partial(correlation_features_mp, user=user_interest, news=news_vector), split_dfs)
-        p.close()
-        p.join()
+        batch = 0
+        for data in pd.read_csv(dir + '/data_for_train.csv', index_col=False, chunksize=200000):
+            batch += 1
+            data = data[['device_id', 'url', 'refresh_timestamp']]
+            # pool_results = correlation_features_mp(data, user_interest, news_vector)
+            p = multiprocessing.Pool(processes=4)
+            split_dfs = np.array_split(data, 4)
+            pool_results = p.map(partial(correlation_features_mp, user=user_interest, news=news_vector), split_dfs)
+            p.close()
+            p.join()
+            # merging parts processed by different processes
+            parts = pd.concat(pool_results, axis=0)
 
-        # merging parts processed by different processes
-        parts = pd.concat(pool_results, axis=0)
-
-        # merging newly calculated parts to big_df
-        parts = parts.fillna(-100)
-        parts.to_csv(dir + '/corr_features.csv', index=False)
-
+            # merging newly calculated parts to big_df
+            parts = parts.fillna(-100)
+            if batch == 1:
+                parts.to_csv(dir + '/corr_features.csv', index=False)
+            else:
+                parts.to_csv(dir + '/corr_features.csv', index=False, header=False, mode='a')
+            print('chunk %d done' % batch)
         gc.collect()
     endtime = datetime.datetime.now()
     print('correlation features done, time cost: ' + str((endtime - starttime).seconds / 60))
@@ -654,13 +663,13 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    get_w2v_category_correlation()
-    category_features()
-    click_features()
+    # get_w2v_category_correlation()
+    # category_features()
+    # click_features()
     correlation_features()
 
     ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
-                        'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
+                        'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category', 'click_ratio_in_1',
                         ]
     train = merge_features()
     # train = train.sample(frac=0.6)

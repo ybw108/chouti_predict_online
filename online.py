@@ -10,6 +10,8 @@ import flask
 import urllib
 import requests
 import json
+from flask_apscheduler import APScheduler
+import os
 
 
 # 去除来源为weibo、抽屉的新闻
@@ -49,7 +51,6 @@ def time_delta(row, t1, t2):
 
 # 重命名列，时间预处理: timestamp 转 datetime，取出日期、小时
 def time_shift(tdata):
-    tdata.rename(columns={'refresh-time': 'refresh_timestamp', 'publish-time': 'publish_timestamp', 'is-click': 'is_click'}, inplace=True)
     # tdata['refresh_timestamp'] = int(round(time.time() * 1000))
     tdata['refresh_time'] = tdata['refresh_timestamp'].apply(timestamp_datetime)
     tdata['publish_time'] = tdata['publish_timestamp'].apply(timestamp_datetime)
@@ -68,6 +69,8 @@ def time_shift(tdata):
 
 # 获取新闻w2v vector
 def request_w2v_vector(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
         url[i] = urllib.parse.quote(url[i])
@@ -75,7 +78,7 @@ def request_w2v_vector(tdata):
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/feature', data=para)
+        r = requests.post('http://ai.chouti.com/news/feature', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
@@ -92,11 +95,15 @@ def request_w2v_vector(tdata):
     # wv = list_to_frame(wv)
     tdata = tdata.reset_index(drop=True)
     tdata = pd.concat([tdata, wv], axis=1)
+    r.close()
+    time.sleep(1)
     return tdata
 
 
 # 获取新闻category
 def request_category(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
         url[i] = urllib.parse.quote(url[i])
@@ -104,7 +111,7 @@ def request_category(tdata):
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/category', data=para)
+        r = requests.post('http://ai.chouti.com/news/category', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
@@ -115,18 +122,21 @@ def request_category(tdata):
     tdata = pd.merge(tdata, category, how='left', on=['url'])
     print('category get')
     r.close()
+    time.sleep(1)
     return tdata
 
 
 # 获取新闻和用户兴趣点的相似度list
 def request_correlation(tdata):
+    headers = {'Server': 'Tengine',
+               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     tdata['post'] = tdata.apply(lambda row: str(row['device_id']) + ',' + str(urllib.parse.quote(row['url'])), axis=1)
     url = '|'.join(list(tdata['post']))
     para = {'str': url}
     code = -1
     i = 0
     while (code != 200) & (i <= 4):
-        r = requests.post('http://ai.chouti.com/news/recommend/user_url_similar', data=para)
+        r = requests.post('http://ai.chouti.com/news/recommend/user_url_similar', data=para, headers=headers)
         code = r.status_code
         i += 1
         if i > 1:
@@ -137,19 +147,21 @@ def request_correlation(tdata):
     tdata = pd.concat([tdata, corr], axis=1)
     tdata = tdata.rename(columns={0: 'corr'})
     del tdata['post']
+    r.close()
+    time.sleep(1)
     return tdata
 
 
-def get_click_features(row, history):
-    history = history.loc[history.url == row.url]
-    history = history.loc[(history.refresh_timestamp < int(row['refresh_timestamp'])) & (history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*25)]
-    for i in [1, 3, 6, 12, 24]:
-        tdata = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*int(i)]
-        row['click_count_in_'+str(i)] = len(tdata)
-        row['click_ratio_in_'+str(i)] = len(tdata.loc[tdata.is_click == 1])/(len(tdata)+0.00001)
-        # rank
-    # print('click features done')
-    return row
+# def get_click_features(row, history):
+#     history = history.loc[history.url == row.url]
+#     history = history.loc[(history.refresh_timestamp < int(row['refresh_timestamp'])) & (history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*25)]
+#     for i in [1, 3, 6, 12, 24]:
+#         tdata = history.loc[history.refresh_timestamp >= row['refresh_timestamp'] - 3600000*int(i)]
+#         row['click_count_in_'+str(i)] = len(tdata)
+#         row['click_ratio_in_'+str(i)] = len(tdata.loc[tdata.is_click == 1])/(len(tdata)+0.00001)
+#         # rank
+#     # print('click features done')
+#     return row
 
 
 def top_k_corr(row):
@@ -162,6 +174,7 @@ def top_k_corr(row):
         temp.index = temp_index
         temp['cosine_top_5_avg'] = temp.mean()
         row = pd.concat([row, temp])
+        row = row.fillna(-100)
         # print('corr get')
         return row
     else:
@@ -182,83 +195,51 @@ def to_dict(row):
 
 def preprocess(df):
     # df = wash(df)
-    ############################################
-    del df['category']
+    # del df['category']
     df = time_shift(df)
     print('preprocess done')
     return df
 
 
-def get_category_features(df):
-    # category features
-    t_history = history.loc[history.device_id.isin(df['device_id'])]
-    result = pd.DataFrame()
-    L = list(df['refresh_date'].unique())
-    for i in range(len(L)):
-        tt_history = t_history.loc[
-            (t_history.refresh_date < str(L[i])) & (t_history.refresh_date >= str(L[i] - datetime.timedelta(days=7)))]
-        temp = tt_history.groupby(['device_id'])[['cat_art', 'cat_car', 'cat_edu', 'cat_ent', 'cat_finance', 'cat_game',
-                                                  'cat_gj', 'cat_other', 'cat_party', 'cat_sh', 'cat_sport', 'cat_tech',
-                                                  'cat_war', 'cat_weather']].mean().reset_index()
-        temp['refresh_date'] = L[i]
-
-        if i == 0:
-            result = temp
-        else:
-            result = pd.concat([result, temp])
-        print('%s category features done' % L[i])
-    df = pd.merge(df, result, on=['device_id', 'refresh_date'], how='left')
-
-    df = request_category(df)
-    df['category'] = df['category'].fillna('other')
-    df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
-    return df
-
-
-def make_features(df, history):
+def make_features(df, features):
+    # 预处理
     df = preprocess(df)
-    ############################################
-    # df = df.apply(get_click_features, axis=1, history=history)
+    # 兴趣点和新闻相关性特征
     df = request_correlation(df)
     df['cosine_all_avg'] = df['corr'].apply(lambda x: sum(x) / len(x) if x != [] else -100)
     df = df.apply(top_k_corr, axis=1)
     del df['corr']
-
-    df = get_category_features(df)
+    # 用户历史浏览新闻的类别分布特征
+    df = pd.merge(df, features, on=['device_id'], how='left')
+    df = request_category(df)
+    df['category'] = df['category'].fillna('other')
+    df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
+    # 新闻的word2vec向量特征
     df = request_w2v_vector(df)
 
     return df
 
 
 def read_data():  #########################
-    #category = pd.read_csv('./data/news_category.csv', index_col=False)
-    category2 = pd.read_csv('./data/news_category2.csv', index_col=False)
-    category3 = pd.read_csv('./data/news_category3.csv', index_col=False)
-    category = pd.concat([category2, category3])
-    category = category.drop_duplicates(['url']).reset_index(drop=True)
-    category = category.fillna('other')
-    del (category['link_id'])
-    del category2, category3
-    gc.collect()
+    global cat_features
+    cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    print('category features updated at ' + str(datetime.datetime.now()))
+    # print(cat_features.head(1))
 
-    # 取出历史点击情况
-    #data = pd.read_csv('./data/raw_data.csv', index_col=False)
-    data2 = pd.read_csv('./data/raw_data2.csv', index_col=False)
-    data3 = pd.read_csv('./data/raw_data3.csv', index_col=False)
-
-    #data = data.loc[data.is_click == 1]
-    data2 = data2.loc[data2.is_click == 1]
-    data3 = data3.loc[data3.is_click == 1]
-
-    #del (data['category'])
-    del (data2['category'])
-    del (data3['category'])
-    data = pd.concat([data2, data3])
-    data = data.drop_duplicates().reset_index(drop=True)
-    data = pd.merge(data, category, how='left', on=['url'])
-    data = data[['device_id', 'refresh_timestamp', 'refresh_date', 'refresh_day', 'url', 'category', 'is_click']]
-    data = pd.concat([data, pd.get_dummies(data['category'], prefix='cat')], axis=1)
-    return data
+class Config(object):
+    # Scheduler config
+    JOBS = [
+        {
+            'id': 'job1',
+            'func': '__main__:read_data',
+            'args': None,
+            'trigger': 'interval',
+            'seconds': 20
+            # 'trigger': 'cron',
+            # 'hour': 4,
+            # 'minute': 00,
+        }
+            ]
 
 
 server = flask.Flask(__name__) # 创建一个flask对象
@@ -266,39 +247,32 @@ server = flask.Flask(__name__) # 创建一个flask对象
 
 @server.route('/predict', methods=['post'])
 def predict():
-
-    ###############################
-    id = request.form.get('device_id')
+    device_id = request.form.get('device_id')
     data = request.form.get('news_data')
     data = pd.DataFrame(json.loads(data))
-    data['device_id'] = id
+    data.rename(columns={'link': 'link_id', 'p_time': 'publish_timestamp', 'click_24': 'click_ratio_in_24'}, inplace=True)
+    data['device_id'] = device_id
+    data['refresh_timestamp'] = int(round(time.time() * 1000))
     print(data.columns)
-    data = make_features(data, history)
+    data = make_features(data, cat_features)
 
     used_features = [c for c in data if
-                     c not in ['device_id', 'link_id', 'is_click', 'url', 'category', 'publish_time', 'publish_timestamp',
-                               'refresh_day', 'refresh_time', 'refresh_date', 'refresh_hour', 'refresh_timestamp', 'category',
-                               # 'cosine_with_top1', 'cosine_with_top2', 'cosine_with_top3', 'cosine_with_top4',
-                               # 'cosine_with_top5',
-                               'euclidean_with_top1', 'euclidean_with_top2', 'euclidean_with_top3', 'euclidean_with_top4',
-                               'euclidean_with_top5',
-                               'manhattan_with_top1', 'manhattan_with_top2', 'manhattan_with_top3', 'manhattan_with_top4',
-                               'manhattan_with_top5',
-                               'top_5_avg_euclidean', 'top_5_avg_manhattan',  # 'top_5_avg_cosine',
-                               'avg_euc_center', 'avg_man_center',  # 'avg_cosine_center',
-                               'click_ratio_in_6', 'click_ratio_in_3', 'click_ratio_in_12',
-                               # 'click_ratio_in_1','click_ratio_in_24',
-                               'click_count_in_1', 'click_count_in_3', 'click_count_in_6', 'click_count_in_12',
-                               'click_count_in_24',
-
-                               ]]
+                     c not in ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
+                               'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
+                     ]]
     model = joblib.load('./lightgbm_model.m')
     data['predict'] = model.predict_proba(data[used_features])[:, 1]
     data['result'] = data[['link_id', 'predict']].apply(to_dict, axis=1)
     return json.dumps(list(data['result']))
-    # result = 'hello'
-    # return result
 
 
-history = read_data() ################################
-server.run(port=8000, debug=True)
+if __name__ == '__main__':
+    cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    print('category features loaded')
+    scheduler = APScheduler()
+    server.config.from_object(Config())
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        scheduler.init_app(server)
+    # trigger schduler
+    scheduler.start()
+    server.run(port=8000, debug=True)
