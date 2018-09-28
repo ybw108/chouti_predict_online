@@ -1,3 +1,4 @@
+# coding: utf-8
 import schedule
 import time
 import datetime
@@ -162,7 +163,7 @@ def job():
     gc.collect()
     result = result.fillna('other')
     result = result.fillna('other')
-    result.to_csv('./data/cat.csv', index=False)
+    # result.to_csv('./data/cat.csv', index=False)
     history = pd.merge(history, result, on=['url'], how='left')
     endtime = datetime.datetime.now()
     print('category vector get, time cost: ' + str((endtime - starttime).seconds / 60))

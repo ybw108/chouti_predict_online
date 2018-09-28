@@ -79,7 +79,7 @@ def get_w2v_vector(tdata):
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
-        url[i] = urllib.parse.quote(url[i])
+        url[i] = urllib.pathname2url(url[i])
     para = {'urlStr': url}
     code = -1
     i = 0
@@ -110,7 +110,7 @@ def get_category(tdata):
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
-        url[i] = urllib.parse.quote(url[i])
+        url[i] = urllib.pathname2url(url[i])
     para = {'urlStr': url}
     code = -1
     i = 0
@@ -355,6 +355,7 @@ def get_w2v_category_correlation():
 
 
 def category_features():
+    print('begin generating category features...')
     starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/category_features.csv'):
         data = pd.read_csv(dir+'/data_for_train.csv', index_col=False)
@@ -399,6 +400,7 @@ def category_features():
 
 
 def click_features():
+    print('begin generating click features...')
     starttime = datetime.datetime.now()
     if not os.path.exists(dir + '/click_features.csv'):
         data = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
@@ -467,14 +469,12 @@ def merge_features():
     train = pd.read_csv(dir + '/data_for_train.csv', index_col=False)
     click_features = pd.read_csv(dir + '/click_features.csv', index_col=False)
     category_features = pd.read_csv(dir + '/category_features.csv', index_col=False)
-
-    # corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
-    # corr_features = corr_features.fillna(-100)
+    corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
 
     # 对 news_vector PCA降维
     news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
     x = news_vector.iloc[:, 1:]
-    pca = PCA(n_components=100)
+    pca = PCA(n_components=100, random_state=2018)
     x_pca = pca.fit_transform(x)
     joblib.dump(pca, dir + '/pca_model.m')
     x_pca = x_pca.astype(np.float16)
@@ -487,6 +487,8 @@ def merge_features():
     train = pd.merge(train, click_features, how='left', on=['url', 'refresh_day', 'refresh_hour'])
     train = pd.merge(train, category_features, how='left', on=['device_id', 'refresh_day'])
     train = train.fillna(1/14)
+
+    train = pd.merge(train, corr_features, how='left', on=['device_id', 'url', 'refresh_timestamp'])
     train = pd.merge(train, vector, how='left', on=['url'])
     del train['url']
     # train.to_csv(dir+'/train_set.csv', index=False)
@@ -514,7 +516,7 @@ def best_cutoff_search(train, used_features):
                                   )
     print('begin searching best cutoff...')
     model = gbm.fit(train[used_features], train['is_click'], eval_set=[(valid[used_features], valid['is_click'])],
-                    eval_metric='auc', early_stopping_rounds=50, verbose=False)
+                    eval_metric='auc', early_stopping_rounds=50, verbose=200)
     valid['predict'] = gbm.predict_proba(valid[used_features], num_iteration=model.best_iteration_)[:, 1]
     L = [i/100.0 for i in range(0, 75, 5)]
     accuracy_dict = {}
@@ -530,7 +532,7 @@ def best_cutoff_search(train, used_features):
     return model.best_iteration_
 
 
-def online_model(train, used_features, iterations):
+def online_model(train, used_features, iterations=1500):
     starttime = datetime.datetime.now()
     gbm = lightgbm.LGBMClassifier(objective='binary', n_estimators=int(iterations), seed=2018,
                                   learning_rate=0.05,
@@ -663,9 +665,9 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
-    # get_w2v_category_correlation()
-    # category_features()
-    # click_features()
+    get_w2v_category_correlation()
+    category_features()
+    click_features()
     correlation_features()
 
     ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',

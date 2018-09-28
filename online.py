@@ -1,3 +1,4 @@
+# coding: utf-8
 import pandas as pd
 import numpy as np
 import gc
@@ -12,6 +13,12 @@ import requests
 import json
 from flask_apscheduler import APScheduler
 import os
+
+
+def convert(row, r_dict):
+    key = int(row['link_id'])
+    r_dict[key] = row['predict']
+    return r_dict
 
 
 # 去除来源为weibo、抽屉的新闻
@@ -57,13 +64,13 @@ def time_shift(tdata):
 
     tdata['diff_hour'] = tdata.apply(time_delta, axis=1, t1='refresh_time', t2='publish_time')
 
-    tdata['refresh_time'] = pd.to_datetime(tdata['refresh_time'])
-    tdata['publish_time'] = pd.to_datetime(tdata['publish_time'])
-    tdata['refresh_date'] = tdata['refresh_time'].dt.date
-    tdata['refresh_day'] = tdata['refresh_time'].dt.day
-    tdata['refresh_hour'] = tdata['refresh_time'].dt.hour
+    # tdata['refresh_time'] = pd.to_datetime(tdata['refresh_time'])
+    # tdata['publish_time'] = pd.to_datetime(tdata['publish_time'])
+    # tdata['refresh_date'] = tdata['refresh_time'].dt.date
+    # tdata['refresh_day'] = tdata['refresh_time'].dt.day
+    # tdata['refresh_hour'] = tdata['refresh_time'].dt.hour
 
-    print('time shift done')
+    # print('time shift done')
     return tdata
 
 
@@ -73,7 +80,7 @@ def request_w2v_vector(tdata):
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
-        url[i] = urllib.parse.quote(url[i])
+        url[i] = urllib.pathname2url(url[i])
     para = {'urlStr': url}
     code = -1
     i = 0
@@ -106,7 +113,7 @@ def request_category(tdata):
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
     url = list(tdata['url'])
     for i in range(len(url)):
-        url[i] = urllib.parse.quote(url[i])
+        url[i] = urllib.pathname2url(url[i])
     para = {'urlStr': url}
     code = -1
     i = 0
@@ -130,7 +137,7 @@ def request_category(tdata):
 def request_correlation(tdata):
     headers = {'Server': 'Tengine',
                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36 Edge/15.15063'}
-    tdata['post'] = tdata.apply(lambda row: str(row['device_id']) + ',' + str(urllib.parse.quote(row['url'])), axis=1)
+    tdata['post'] = tdata.apply(lambda row: str(row['device_id']) + ',' + str(urllib.pathname2url(row['url'])), axis=1)
     url = '|'.join(list(tdata['post']))
     para = {'str': url}
     code = -1
@@ -205,26 +212,29 @@ def make_features(df, features):
     # 预处理
     df = preprocess(df)
     # 兴趣点和新闻相关性特征
-    df = request_correlation(df)
+    # df = request_correlation(df)
     df['cosine_all_avg'] = df['corr'].apply(lambda x: sum(x) / len(x) if x != [] else -100)
     df = df.apply(top_k_corr, axis=1)
     del df['corr']
     # 用户历史浏览新闻的类别分布特征
     df = pd.merge(df, features, on=['device_id'], how='left')
-    df = request_category(df)
-    df['category'] = df['category'].fillna('other')
-    df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
-    # 新闻的word2vec向量特征
-    df = request_w2v_vector(df)
+    # df = request_category(df)
+    # df['category'] = df['category'].fillna('other')
+    # df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
+    # # 新闻的word2vec向量特征
+    # df = request_w2v_vector(df)
 
     return df
 
 
 def read_data():  #########################
-    global cat_features
+    global cat_features, gbm, pca
     cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    gbm = joblib.load('./lightgbm_model.m')
+    pca = joblib.load('./pca_model.m')
     print('category features updated at ' + str(datetime.datetime.now()))
     # print(cat_features.head(1))
+
 
 class Config(object):
     # Scheduler config
@@ -233,11 +243,11 @@ class Config(object):
             'id': 'job1',
             'func': '__main__:read_data',
             'args': None,
-            'trigger': 'interval',
-            'seconds': 20
-            # 'trigger': 'cron',
-            # 'hour': 4,
-            # 'minute': 00,
+            # 'trigger': 'interval',
+            # 'seconds': 20,
+            'trigger': 'cron',
+            'hour': 4,
+            'minute': 00,
         }
             ]
 
@@ -250,24 +260,32 @@ def predict():
     device_id = request.form.get('device_id')
     data = request.form.get('news_data')
     data = pd.DataFrame(json.loads(data))
-    data.rename(columns={'link': 'link_id', 'p_time': 'publish_timestamp', 'click_24': 'click_ratio_in_24'}, inplace=True)
+    data.rename(columns={'link': 'link_id', 'p_time': 'publish_timestamp', 'click_24': 'click_ratio_in_24', 'cat': 'category'}, inplace=True)
     data['device_id'] = device_id
     data['refresh_timestamp'] = int(round(time.time() * 1000))
-    print(data.columns)
+
     data = make_features(data, cat_features)
+    # data['vector'] = data['vector'].apply(lambda x: eval(x))
+    # print(data.columns)
+    vector = pd.DataFrame(list(data['vector']))
+    vector = pca.transform(vector)
+    data = pd.concat([data, pd.DataFrame(vector)], axis=1)
+    del data['vector']
 
     used_features = [c for c in data if
                      c not in ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
-                               'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category',
+                               'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category', 'click_ratio_in_1',
                      ]]
-    model = joblib.load('./lightgbm_model.m')
-    data['predict'] = model.predict_proba(data[used_features])[:, 1]
-    data['result'] = data[['link_id', 'predict']].apply(to_dict, axis=1)
-    return json.dumps(list(data['result']))
+    data['predict'] = gbm.predict_proba(data[used_features])[:, 1]
+    r_dict = {}
+    result = data.apply(convert, r_dict=r_dict, axis=1)
+    return json.dumps(result.iloc[0])
 
 
 if __name__ == '__main__':
     cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    gbm = joblib.load('./lightgbm_model.m')
+    pca = joblib.load('./pca_model.m')
     print('category features loaded')
     scheduler = APScheduler()
     server.config.from_object(Config())
@@ -275,4 +293,4 @@ if __name__ == '__main__':
         scheduler.init_app(server)
     # trigger schduler
     scheduler.start()
-    server.run(port=8000, debug=True)
+    server.run(host='0.0.0.0', port=8000, debug=True)

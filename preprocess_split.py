@@ -67,7 +67,7 @@ def subsample(data, fraction):
     data = data.sample(frac=1)
     return data
 
-
+# 输入起始日期和终止日期，从全量数据集里提取训练集
 def split(startdate, enddate):
     batch = 0
     print('begin splitting train set...')
