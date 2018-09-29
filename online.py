@@ -190,7 +190,11 @@ def top_k_corr(row):
 
 
 def get_cat_ratio(row):
-    x = row['cat_'+str(row['category'])]
+    name = 'cat_' + str(row['category'])
+    if name in row.index:
+        x = row[name]
+    else:
+        x = 0
     return x
 
 
@@ -211,16 +215,19 @@ def preprocess(df):
 def make_features(df, features):
     # 预处理
     df = preprocess(df)
+
+    # 用户历史浏览新闻的类别分布特征
+    df = pd.merge(df, features, on=['device_id'], how='left')
+    # df = request_category(df)
+    # df['category'] = df['category'].fillna('other')
+    df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
+
     # 兴趣点和新闻相关性特征
     # df = request_correlation(df)
     df['cosine_all_avg'] = df['corr'].apply(lambda x: sum(x) / len(x) if x != [] else -100)
     df = df.apply(top_k_corr, axis=1)
     del df['corr']
-    # 用户历史浏览新闻的类别分布特征
-    df = pd.merge(df, features, on=['device_id'], how='left')
-    # df = request_category(df)
-    # df['category'] = df['category'].fillna('other')
-    # df['news_cat_ratio'] = df.apply(get_cat_ratio, axis=1)
+
     # # 新闻的word2vec向量特征
     # df = request_w2v_vector(df)
 
@@ -228,11 +235,12 @@ def make_features(df, features):
 
 
 def read_data():  #########################
-    global cat_features, gbm, pca
+    global cat_features, gbm, pca, col_name
     cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    col_name = pd.read_csv('./data/col_name.csv', index_col=False)
     gbm = joblib.load('./lightgbm_model.m')
     pca = joblib.load('./pca_model.m')
-    print('category features updated at ' + str(datetime.datetime.now()))
+    print('category features & model updated at ' + str(datetime.datetime.now()))
     # print(cat_features.head(1))
 
 
@@ -265,17 +273,16 @@ def predict():
     data['refresh_timestamp'] = int(round(time.time() * 1000))
 
     data = make_features(data, cat_features)
-    # data['vector'] = data['vector'].apply(lambda x: eval(x))
-    # print(data.columns)
     vector = pd.DataFrame(list(data['vector']))
     vector = pca.transform(vector)
     data = pd.concat([data, pd.DataFrame(vector)], axis=1)
     del data['vector']
 
-    used_features = [c for c in data if
-                     c not in ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
-                               'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category', 'click_ratio_in_1',
-                     ]]
+    used_features = eval(col_name[0])
+    # used_features = [c for c in data if
+    #                  c not in ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
+    #                            'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category', 'click_ratio_in_1',
+    #                  ]]
     data['predict'] = gbm.predict_proba(data[used_features])[:, 1]
     r_dict = {}
     result = data.apply(convert, r_dict=r_dict, axis=1)
@@ -284,9 +291,11 @@ def predict():
 
 if __name__ == '__main__':
     cat_features = pd.read_csv('./data/category_features_online.csv', index_col=False)
+    col_name = pd.read_csv('./data/col_name.csv', index_col=False)
     gbm = joblib.load('./lightgbm_model.m')
     pca = joblib.load('./pca_model.m')
-    print('category features loaded')
+    print('category features & model loaded')
+
     scheduler = APScheduler()
     server.config.from_object(Config())
     if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':

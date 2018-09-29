@@ -168,14 +168,16 @@ def job():
     endtime = datetime.datetime.now()
     print('category vector get, time cost: ' + str((endtime - starttime).seconds / 60))
 
+    col_name = pd.read_csv('./data/col_name.csv', index_col=False)
+    col_name = eval(col_name[1])
     history = history[['device_id', 'refresh_timestamp', 'refresh_date', 'url', 'category']]
     history = pd.concat([history, pd.get_dummies(history['category'], prefix='cat')], axis=1)
-
+    # 如果出现 训练集中的部分类别 在近7天没有出现的情况，就把近7天这些类别的对应分布填0 防后面报错
+    for i in col_name:
+        if i not in list(history.columns[5:]):
+            history[i] = 0
     # 7天内出现的所有用户的点击历史
-    temp = history.groupby(['device_id'])[
-        ['cat_art', 'cat_car', 'cat_edu', 'cat_ent', 'cat_finance', 'cat_game',
-         'cat_gj', 'cat_other', 'cat_party', 'cat_sh', 'cat_sport', 'cat_tech',
-         'cat_war', 'cat_weather']].mean().reset_index()
+    temp = history.groupby(['device_id'])[col_name].mean().reset_index()
 
     if not os.path.exists('./data/category_features_online.csv'):
         temp.to_csv('./data/category_features_online.csv', index=False)

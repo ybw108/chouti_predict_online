@@ -214,6 +214,14 @@ def correlation_features_mp(df, user, news):
              'cosine_with_top5', 'cosine_top_5_avg', 'cosine_all_avg']]
     return df
 
+
+def get_cat_ratio(row):
+    name = 'cat_' + str(row['category'])
+    if name in row.index:
+        x = row[name]
+    else:
+        x = 0
+    return x
 ###################################################
 
 
@@ -324,9 +332,9 @@ def get_w2v_category_correlation():
                     batch += 1
                     df = get_interest(df)
                     if batch == 1:
-                        df.to_csv(dir+'/user_interest2.csv', index=False, encoding='utf-8')
+                        df.to_csv(dir+'/user_interest.csv', index=False, encoding='utf-8')
                     else:
-                        df.to_csv(dir+'/user_interest2.csv', index=False, header=False, mode='a', encoding='utf-8')
+                        df.to_csv(dir+'/user_interest.csv', index=False, header=False, mode='a', encoding='utf-8')
                     print('chunk %d done.' % batch)
 
                 except KeyError as reason:
@@ -378,9 +386,7 @@ def category_features():
         L = list(cat_data['refresh_date'].unique())
         for i in range(len(L)):
             tt_history = t_history.loc[(t_history.refresh_date < L[i]) & (t_history.refresh_date >= str(datetime.datetime.strptime(L[i], '%Y-%m-%d') - datetime.timedelta(days=7)))]
-            temp = tt_history.groupby(['device_id'])[['cat_art', 'cat_car', 'cat_edu', 'cat_ent', 'cat_finance', 'cat_game',
-                                                      'cat_gj', 'cat_other', 'cat_party', 'cat_sh', 'cat_sport', 'cat_tech',
-                                                      'cat_war', 'cat_weather']].mean().reset_index()
+            temp = tt_history.groupby(['device_id'])[list(history.columns[5:])].mean().reset_index()
             temp['refresh_date'] = L[i]
 
             if i == 0:
@@ -389,11 +395,8 @@ def category_features():
                 result = pd.concat([result, temp])
             print('%s done' % L[i])
         cat_data = pd.merge(cat_data, result, on=['device_id', 'refresh_date'], how='left')
-
-        cat_data = cat_data[
-            ['device_id', 'refresh_day', 'cat_art', 'cat_car', 'cat_edu', 'cat_ent', 'cat_finance', 'cat_game',
-             'cat_gj', 'cat_other', 'cat_party', 'cat_sh', 'cat_sport', 'cat_tech',
-             'cat_war', 'cat_weather']]
+        col_name = ['device_id', 'refresh_day'] + list(history.columns[5:])
+        cat_data = cat_data[col_name]
         cat_data.to_csv(dir+'/category_features.csv', index=False)
     endtime = datetime.datetime.now()
     print('category features done, time cost: ' + str((endtime - starttime).seconds / 60))
@@ -470,6 +473,8 @@ def merge_features():
     click_features = pd.read_csv(dir + '/click_features.csv', index_col=False)
     category_features = pd.read_csv(dir + '/category_features.csv', index_col=False)
     corr_features = pd.read_csv(dir + '/corr_features.csv', index_col=False)
+    news_category = pd.read_csv(dir + '/news_category.csv', index_col=False)
+    news_category = news_category.fillna('other')
 
     # 对 news_vector PCA降维
     news_vector = pd.read_csv(dir + '/news_vector.csv', index_col=False)
@@ -483,20 +488,23 @@ def merge_features():
     del news_vector
     gc.collect()
 
-    print('read done')
+    print('read done, begin merging features...')
     train = pd.merge(train, click_features, how='left', on=['url', 'refresh_day', 'refresh_hour'])
     train = pd.merge(train, category_features, how='left', on=['device_id', 'refresh_day'])
     train = train.fillna(1/14)
+    train = pd.merge(train, news_category, how='left', on=['url'])
+    train['news_cat_ratio'] = train.apply(get_cat_ratio, axis=1)
+    del train['category'], news_category, category_features
+    gc.collect()
 
     train = pd.merge(train, corr_features, how='left', on=['device_id', 'url', 'refresh_timestamp'])
     train = pd.merge(train, vector, how='left', on=['url'])
-    del train['url']
-    # train.to_csv(dir+'/train_set.csv', index=False)
+    del train['url'], corr_features
+    gc.collect()
     print('merge done')
     return train
 
 
-# 抽样训练
 def best_cutoff_search(train, used_features):
     date = train['refresh_date'].unique()
     date.sort()
@@ -665,19 +673,27 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
 
+    # 生成特征
     get_w2v_category_correlation()
     category_features()
     click_features()
     correlation_features()
 
+    # 合并特征
     ignored_features = ['device_id', 'link_id', 'is_click', 'category', 'publish_time', 'publish_timestamp', 'refresh_date',
                         'refresh_day',  'refresh_time', 'refresh_hour', 'refresh_timestamp', 'category', 'click_ratio_in_1',
                         ]
     train = merge_features()
-    # train = train.sample(frac=0.6)
+    # 保存列名文件
+    cat = pd.read_csv(dir+'/category_features.csv', index_col=False)
+    train_col = pd.Series([list(train.columns), list(cat.columns[2:])])
+    del cat
+    train_col.to_csv('./data/col_name.csv', index=False)
 
+    # 线下搜索最优阈值、最优迭代次数
     used_features = [c for c in train if c not in ignored_features]
-    iterations = best_cutoff_search(train, used_features)
     print(train[used_features].info())
+    iterations = best_cutoff_search(train, used_features)
+    # 生成线上模型
     online_model(train, used_features, iterations)
 

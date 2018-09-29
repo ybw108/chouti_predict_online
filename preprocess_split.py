@@ -1,3 +1,4 @@
+# coding: utf-8
 import pandas as pd
 import numpy as np
 import gc
@@ -67,33 +68,54 @@ def subsample(data, fraction):
     data = data.sample(frac=1)
     return data
 
-# 输入起始日期和终止日期，从全量数据集里提取训练集
-def split(startdate, enddate):
+
+# # 传入起始日期和终止日期，从全量数据集里提取训练集
+# def split(startdate, enddate):
+#     batch = 0
+#     print('begin splitting train set...')
+#     if startdate < enddate:
+#         for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
+#             batch += 1
+#             data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)]
+#             print('writing chunk %d...' % batch)
+#             if batch == 1:
+#                 data.to_csv(dir + '/data_for_train.csv', index=False)
+#             else:
+#                 data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
+#     else:
+#         L = list(range(startdate, enddate+32))
+#         for i in range(len(L)):
+#             if L[i] > 31:
+#                 L[i] -= 31
+#         for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
+#             batch += 1
+#             data = data.loc[data.refresh_day.isin(L)]
+#             print('writing chunk %d...' % batch)
+#             if batch == 1:
+#                 data.to_csv(dir + '/data_for_train.csv', index=False)
+#             else:
+#                 data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
+#     return
+
+
+# 不需要传入参数，直接把全量数据集的前7天去掉，取剩余部分作训练集
+def split():
     batch = 0
     print('begin splitting train set...')
-    if startdate < enddate:
-        for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
-            batch += 1
-            data = data.loc[(data.refresh_day >= startdate) & (data.refresh_day <= enddate)]
-            print('writing chunk %d...' % batch)
-            if batch == 1:
-                data.to_csv(dir + '/data_for_train.csv', index=False)
-            else:
-                data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
-    else:
-        L = list(range(startdate, enddate+32))
-        for i in range(len(L)):
-            if L[i] > 31:
-                L[i] -= 31
-        for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
-            batch += 1
-            data = data.loc[data.refresh_day.isin(L)]
-            print('writing chunk %d...' % batch)
-            if batch == 1:
-                data.to_csv(dir + '/data_for_train.csv', index=False)
-            else:
-                data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
-    return
+    data = pd.read_csv(dir + '/history.csv', index_col=False,  error_bad_lines=False)
+    L = list(data['refresh_date'].unique())
+    L.sort()
+    L = L[7:]
+    del data
+    gc.collect()
+    for data in pd.read_csv(dir + '/history.csv', index_col=False, chunksize=1000000, error_bad_lines=False):
+        batch += 1
+        data = data.loc[data.refresh_date.isin(L)]
+        print('writing chunk %d...' % batch)
+        if batch == 1:
+            data.to_csv(dir + '/data_for_train.csv', index=False)
+        else:
+            data.to_csv(dir + '/data_for_train.csv', index=False, header=False, mode='a')
 
 
 def preprocess_mp(df):
@@ -136,4 +158,4 @@ if __name__ == '__main__':
     if not os.path.exists(dir):
         os.makedirs(dir)
     preprocess()
-    split(4, 10)  # (4,10)
+    split()  # (4,10)
